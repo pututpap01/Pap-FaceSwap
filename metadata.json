@@ -1,0 +1,6 @@
+{
+  "name": "FaceMorph AI",
+  "description": "Generator Face Swap instan tanpa batas dan tanpa watermark dengan AI lokal, privasi end-to-end terenkripsi, editor pro canggih, dan share media sosial.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
