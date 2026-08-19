@@ -31,10 +31,14 @@ jobs:
 
       - name: Prepare Keystore & Environment
         run: |
-          # 1. Restore debug.keystore from base64 if needed
+          # 1. Restore debug.keystore from base64 if present, else generate via keytool
           if [ -f "debug.keystore.base64" ]; then
-            base64 -d debug.keystore.base64 > debug.keystore
+            base64 -d debug.keystore.base64 > debug.keystore 2>/dev/null || true
             echo "✅ debug.keystore restored from base64"
+          fi
+          if [ ! -f "debug.keystore" ]; then
+            keytool -genkeypair -v -keystore debug.keystore -alias androiddebugkey -keypass android -storepass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+            echo "✅ debug.keystore generated fallback"
           fi
           
           # 2. Prepare .env for secrets plugin
@@ -54,7 +58,7 @@ jobs:
 
       - name: Build Debug APK
         run: |
-          gradle assembleDebug --stacktrace --no-daemon -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g"
+          gradle assembleDebug --stacktrace --no-daemon --no-configuration-cache -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g"
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
