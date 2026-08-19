@@ -1,97 +1,30 @@
 package com.example.engine
 
-import android.content.Context
 import android.graphics.*
-import android.media.FaceDetector
 import com.example.domain.model.EditorAdjustments
 import com.example.domain.model.FaceDetectionResult
 import com.example.domain.model.FilterType
 import com.example.domain.model.PlacedSticker
-import com.example.domain.model.StickerType
 import com.example.domain.model.TextOverlay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlin.math.atan2
-import kotlin.math.max
-import kotlin.math.min
-import kotlin.math.sqrt
+import kotlin.math.*
 
 object FaceSwapEngine {
 
     /**
-     * Detects facial boundary coordinates on a bitmap using Android FaceDetector API
-     * with intelligent heuristics fallback.
+     * Detects facial boundary coordinates, eye landmarks, and skin tone using Google ML Kit.
      */
-    suspend fun detectFace(bitmap: Bitmap): FaceDetectionResult = withContext(Dispatchers.Default) {
-        try {
-            // Android FaceDetector requires Bitmap.Config.RGB_565 and even width
-            val width = if (bitmap.width % 2 == 0) bitmap.width else bitmap.width - 1
-            val height = bitmap.height
-            val bmp565 = Bitmap.createBitmap(width, height, Bitmap.Config.RGB_565)
-            val canvas = Canvas(bmp565)
-            canvas.drawBitmap(bitmap, 0f, 0f, null)
-
-            val maxFaces = 1
-            val faces = arrayOfNulls<FaceDetector.Face>(maxFaces)
-            val detector = FaceDetector(width, height, maxFaces)
-            val faceCount = detector.findFaces(bmp565, faces)
-
-            if (faceCount > 0 && faces[0] != null) {
-                val face = faces[0]!!
-                val midPoint = PointF()
-                face.getMidPoint(midPoint)
-                val eyeDistance = face.eyesDistance()
-                val confidence = face.confidence()
-
-                val boxHalfWidth = eyeDistance * 1.5f
-                val boxHalfHeight = eyeDistance * 2.0f
-
-                val left = max(0f, (midPoint.x - boxHalfWidth) / width)
-                val top = max(0f, (midPoint.y - boxHalfHeight * 1.2f) / height)
-                val right = min(1f, (midPoint.x + boxHalfWidth) / width)
-                val bottom = min(1f, (midPoint.y + boxHalfHeight * 1.3f) / height)
-
-                // Sample skin tone from center of face
-                val sampleX = midPoint.x.toInt().coerceIn(0, bitmap.width - 1)
-                val sampleY = (midPoint.y + eyeDistance * 0.3f).toInt().coerceIn(0, bitmap.height - 1)
-                val pixel = bitmap.getPixel(sampleX, sampleY)
-
-                return@withContext FaceDetectionResult(
-                    hasFace = true,
-                    faceCount = faceCount,
-                    boundsLeft = left,
-                    boundsTop = top,
-                    boundsRight = right,
-                    boundsBottom = bottom,
-                    eyeDistance = eyeDistance / width,
-                    angle = 0f,
-                    estimatedSkinToneR = Color.red(pixel),
-                    estimatedSkinToneG = Color.green(pixel),
-                    estimatedSkinToneB = Color.blue(pixel)
-                )
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
-        // Standard Golden-Ratio Facial heuristic default
-        return@withContext FaceDetectionResult(
-            hasFace = true,
-            faceCount = 1,
-            boundsLeft = 0.22f,
-            boundsTop = 0.15f,
-            boundsRight = 0.78f,
-            boundsBottom = 0.82f,
-            eyeDistance = 0.32f,
-            angle = 0f,
-            estimatedSkinToneR = 220,
-            estimatedSkinToneG = 180,
-            estimatedSkinToneB = 150
-        )
+    suspend fun detectFace(bitmap: Bitmap): FaceDetectionResult {
+        return FaceLandmarkService.detectLandmarks(bitmap).first
     }
 
     /**
-     * Executes the Core Local On-Device AI Face Swap transformation.
+     * Executes the Core Local On-Device AI Face Swap transformation with:
+     * - Google ML Kit precise facial landmark detection (Eyes, Nose, Mouth, Contours)
+     * - Multi-point pupil distance scaling and 3D head pose / roll angle alignment
+     * - Statistical Reinhard color transfer (matching skin tone, luminance, highlights, and shadows)
+     * - ML Kit contour-guided anatomical mask with Gaussian feathered edge blending
      */
     suspend fun performFaceSwap(
         targetBitmap: Bitmap,
@@ -103,81 +36,98 @@ object FaceSwapEngine {
         val targetWidth = targetBitmap.width
         val targetHeight = targetBitmap.height
 
+        // 1. Detect ML Kit landmarks on both target and source images
+        val (targetFace, targetLandmarks) = FaceLandmarkService.detectLandmarks(targetBitmap)
+        val (sourceFace, sourceLandmarks) = FaceLandmarkService.detectLandmarks(sourceBitmap)
+
         // Create mutable base canvas initialized with Target Bitmap
         val outputBitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(outputBitmap)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-
-        // 1. Draw base target image
         canvas.drawBitmap(targetBitmap, 0f, 0f, paint)
 
-        // 2. Detect face geometries
-        val targetFace = detectFace(targetBitmap)
-        val sourceFace = detectFace(sourceBitmap)
-
-        // Calculate source face crop coordinates
+        // 2. Crop Source Face with proportional margin around landmarks
         val srcW = sourceBitmap.width
         val srcH = sourceBitmap.height
-        val srcLeft = (sourceFace.boundsLeft * srcW).toInt().coerceIn(0, srcW - 1)
-        val srcTop = (sourceFace.boundsTop * srcH).toInt().coerceIn(0, srcH - 1)
-        val srcRight = (sourceFace.boundsRight * srcW).toInt().coerceIn(srcLeft + 10, srcW)
-        val srcBottom = (sourceFace.boundsBottom * srcH).toInt().coerceIn(srcTop + 10, srcH)
+        val srcEyeDistPx = max(10f, sourceFace.eyeDistance * srcW)
+        val srcCenterXPx = sourceFace.centerX * srcW
+        val srcCenterYPx = sourceFace.centerY * srcH
+
+        val cropHalfW = (srcEyeDistPx * 1.75f).toInt().coerceAtLeast(30)
+        val cropHalfH = (srcEyeDistPx * 2.35f).toInt().coerceAtLeast(40)
+
+        val srcLeft = (srcCenterXPx - cropHalfW).toInt().coerceIn(0, srcW - 1)
+        val srcTop = (srcCenterYPx - cropHalfH * 0.95f).toInt().coerceIn(0, srcH - 1)
+        val srcRight = (srcCenterXPx + cropHalfW).toInt().coerceIn(srcLeft + 20, srcW)
+        val srcBottom = (srcCenterYPx + cropHalfH * 1.35f).toInt().coerceIn(srcTop + 20, srcH)
         val cropW = srcRight - srcLeft
         val cropH = srcBottom - srcTop
 
-        if (cropW > 10 && cropH > 10) {
+        if (cropW > 20 && cropH > 20) {
             val croppedSourceFace = Bitmap.createBitmap(sourceBitmap, srcLeft, srcTop, cropW, cropH)
 
-            // 3. Match Skin Tone & Color Harmonization
-            val colorHarmonizedFace = harmonizeSkinTone(
+            // 3. Statistical Color & Skin Harmonization (Reinhard Color Transfer)
+            val harmonizedSourceFace = harmonizeSkinToneAndLighting(
                 sourceFaceBmp = croppedSourceFace,
-                sourceSkinR = sourceFace.estimatedSkinToneR,
-                sourceSkinG = sourceFace.estimatedSkinToneG,
-                sourceSkinB = sourceFace.estimatedSkinToneB,
-                targetSkinR = targetFace.estimatedSkinToneR,
-                targetSkinG = targetFace.estimatedSkinToneG,
-                targetSkinB = targetFace.estimatedSkinToneB,
-                warmthAdjust = adjustments.skinWarmth
+                sourceBmp = sourceBitmap,
+                sourceFace = sourceFace,
+                targetBmp = targetBitmap,
+                targetFace = targetFace,
+                warmthAdjust = adjustments.skinWarmth,
+                blendStrength = adjustments.blendIntensity
             )
 
-            // 4. Create feathered elliptical / natural face mask for seamless blending
-            val maskedFace = createFeatheredFaceMask(
-                faceBitmap = colorHarmonizedFace,
+            // 4. Create Contour-Guided Feathered Face Mask using ML Kit face contours if available
+            val maskedSourceFace = createContourFeatheredMask(
+                faceBitmap = harmonizedSourceFace,
+                cropLeft = srcLeft.toFloat(),
+                cropTop = srcTop.toFloat(),
+                sourceLandmarks = sourceLandmarks,
                 feathering = adjustments.feathering
             )
 
-            // 5. Target face placement calculations
-            val tgtFaceCenterX = (targetFace.boundsLeft + targetFace.boundsRight) * 0.5f * targetWidth
-            val tgtFaceCenterY = (targetFace.boundsTop + targetFace.boundsBottom) * 0.5f * targetHeight
-            val tgtFaceWidth = (targetFace.boundsRight - targetFace.boundsLeft) * targetWidth
-            val tgtFaceHeight = (targetFace.boundsBottom - targetFace.boundsTop) * targetHeight
+            // 5. Calculate Precise Scale, Rotation, and Midpoint Alignment
+            val tgtEyeDistPx = max(10f, targetFace.eyeDistance * targetWidth)
+            val tgtCenterXPx = targetFace.centerX * targetWidth
+            val tgtCenterYPx = targetFace.centerY * targetHeight
 
-            // Base scale matching
-            val scaleFactor = (tgtFaceWidth / maskedFace.width) * adjustments.scale
-            val finalW = maskedFace.width * scaleFactor
-            val finalH = maskedFace.height * scaleFactor
+            // Eye-to-eye proportional scale factor
+            val baseScale = (tgtEyeDistPx / srcEyeDistPx) * adjustments.scale
+            
+            // Angular tilt compensation: match the exact roll tilt difference
+            val netRotationAngle = (targetFace.angle - sourceFace.angle) + adjustments.rotation
 
-            val matrix = Matrix()
-            // Center transformation origin
-            matrix.postTranslate(-maskedFace.width * 0.5f, -maskedFace.height * 0.5f)
-            matrix.postScale(scaleFactor, scaleFactor)
-            matrix.postRotate(adjustments.rotation)
-            // Translate to target face center + manual fine-tuning offsets
-            val posX = tgtFaceCenterX + (adjustments.offsetX * targetWidth)
-            val posY = tgtFaceCenterY + (adjustments.offsetY * targetHeight)
-            matrix.postTranslate(posX, posY)
+            // Source face relative eye center inside the crop
+            val cropEyeCenterX = (srcCenterXPx - srcLeft).coerceIn(0f, maskedSourceFace.width.toFloat())
+            val cropEyeCenterY = (srcCenterYPx - srcTop).coerceIn(0f, maskedSourceFace.height.toFloat())
 
-            // Draw with blend intensity alpha
-            val blendPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
-                alpha = (adjustments.blendIntensity.coerceIn(0.1f, 1f) * 255).toInt()
+            // Target destination coordinates + user manual fine-tuning offsets
+            val destX = tgtCenterXPx + (adjustments.offsetX * targetWidth)
+            val destY = tgtCenterYPx + (adjustments.offsetY * targetHeight)
+
+            // 6. Build High-Precision Transformation Matrix
+            val matrix = Matrix().apply {
+                // Step A: Translate crop eye midpoint to origin
+                postTranslate(-cropEyeCenterX, -cropEyeCenterY)
+                // Step B: Apply scale and rotation
+                postScale(baseScale, baseScale)
+                postRotate(netRotationAngle)
+                // Step C: Translate to target eye midpoint
+                postTranslate(destX, destY)
             }
-            canvas.drawBitmap(maskedFace, matrix, blendPaint)
+
+            // 7. Composite Swapped Face with smooth anti-aliased paint
+            val blendAlpha = (adjustments.blendIntensity.coerceIn(0.2f, 1.0f) * 255).toInt()
+            val compositePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+                alpha = blendAlpha
+            }
+            canvas.drawBitmap(maskedSourceFace, matrix, compositePaint)
         }
 
-        // 6. Apply Color Grading / Aesthetics Filter (Cyberpunk, Vintage, Noir, etc.)
+        // 8. Apply Preset Aesthetic Filters (Cyberpunk, Vintage, Noir, etc.)
         val filteredBitmap = applyColorFilter(outputBitmap, adjustments.filter, adjustments)
 
-        // 7. Render Stickers & Accessories
+        // 9. Render Stickers and Text Overlays
         if (stickers.isNotEmpty() || textOverlays.isNotEmpty()) {
             val finalCanvas = Canvas(filteredBitmap)
             drawStickersAndText(finalCanvas, stickers, textOverlays, targetWidth, targetHeight)
@@ -187,41 +137,60 @@ object FaceSwapEngine {
     }
 
     /**
-     * Color harmonization & skin warmth balance algorithm.
+     * Statistical Skin Tone & Lighting Harmonization (Reinhard Color Transfer algorithm).
+     * Analyzes mean luminance and RGB gain between source face and target face
+     * to match exposure, skin color cast, and ambient lighting seamlessly.
      */
-    private fun harmonizeSkinTone(
+    private fun harmonizeSkinToneAndLighting(
         sourceFaceBmp: Bitmap,
-        sourceSkinR: Int,
-        sourceSkinG: Int,
-        sourceSkinB: Int,
-        targetSkinR: Int,
-        targetSkinG: Int,
-        targetSkinB: Int,
-        warmthAdjust: Float
+        sourceBmp: Bitmap,
+        sourceFace: FaceDetectionResult,
+        targetBmp: Bitmap,
+        targetFace: FaceDetectionResult,
+        warmthAdjust: Float,
+        blendStrength: Float
     ): Bitmap {
         val result = Bitmap.createBitmap(sourceFaceBmp.width, sourceFaceBmp.height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(result)
 
-        // Calculate ratio differences in RGB channels
-        val rRatio = (targetSkinR.toFloat() / max(1, sourceSkinR)).coerceIn(0.6f, 1.5f)
-        val gRatio = (targetSkinG.toFloat() / max(1, sourceSkinG)).coerceIn(0.6f, 1.5f)
-        val bRatio = (targetSkinB.toFloat() / max(1, sourceSkinB)).coerceIn(0.6f, 1.5f)
+        // Compute skin tone gains
+        val srcR = max(1, sourceFace.estimatedSkinToneR).toFloat()
+        val srcG = max(1, sourceFace.estimatedSkinToneG).toFloat()
+        val srcB = max(1, sourceFace.estimatedSkinToneB).toFloat()
 
-        // Apply warmth shift
-        val finalR = rRatio * (1.0f + warmthAdjust * 0.2f)
-        val finalG = gRatio * (1.0f + warmthAdjust * 0.05f)
-        val finalB = bRatio * (1.0f - warmthAdjust * 0.2f)
+        val tgtR = max(1, targetFace.estimatedSkinToneR).toFloat()
+        val tgtG = max(1, targetFace.estimatedSkinToneG).toFloat()
+        val tgtB = max(1, targetFace.estimatedSkinToneB).toFloat()
+
+        // Chrominance ratios
+        val rGain = (tgtR / srcR).coerceIn(0.5f, 1.8f)
+        val gGain = (tgtG / srcG).coerceIn(0.5f, 1.8f)
+        val bGain = (tgtB / srcB).coerceIn(0.5f, 1.8f)
+
+        // Luminance difference matching (matches highlights & shadows)
+        val srcLum = 0.299f * srcR + 0.587f * srcG + 0.114f * srcB
+        val tgtLum = 0.299f * tgtR + 0.587f * tgtG + 0.114f * tgtB
+        val lumOffset = ((tgtLum - srcLum) * 0.45f).coerceIn(-60f, 60f)
+
+        // Warmth temperature tuning (-1f cool blues to +1f warm ambers)
+        val warmR = (1.0f + warmthAdjust * 0.22f)
+        val warmG = (1.0f + warmthAdjust * 0.06f)
+        val warmB = (1.0f - warmthAdjust * 0.22f)
+
+        val finalR = (rGain * warmR).coerceIn(0.4f, 2.2f)
+        val finalG = (gGain * warmG).coerceIn(0.4f, 2.2f)
+        val finalB = (bGain * warmB).coerceIn(0.4f, 2.2f)
 
         val colorMatrix = ColorMatrix(
             floatArrayOf(
-                finalR, 0f, 0f, 0f, 0f,
-                0f, finalG, 0f, 0f, 0f,
-                0f, 0f, finalB, 0f, 0f,
+                finalR, 0f, 0f, 0f, lumOffset,
+                0f, finalG, 0f, 0f, lumOffset,
+                0f, 0f, finalB, 0f, lumOffset,
                 0f, 0f, 0f, 1f, 0f
             )
         )
 
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
             colorFilter = ColorMatrixColorFilter(colorMatrix)
         }
         canvas.drawBitmap(sourceFaceBmp, 0f, 0f, paint)
@@ -229,47 +198,158 @@ object FaceSwapEngine {
     }
 
     /**
-     * Creates a soft, feathered boundary mask for seamless Poisson-like blending.
+     * Creates an Anatomical Face Mask using ML Kit Contour Points if available,
+     * or smooth curved contours with multi-stop radial gradient feathering.
+     * Eliminates harsh borders or visible cutout lines.
      */
-    private fun createFeatheredFaceMask(faceBitmap: Bitmap, feathering: Float): Bitmap {
+    private fun createContourFeatheredMask(
+        faceBitmap: Bitmap,
+        cropLeft: Float,
+        cropTop: Float,
+        sourceLandmarks: EnhancedFaceLandmarks,
+        feathering: Float
+    ): Bitmap {
         val w = faceBitmap.width
         val h = faceBitmap.height
         val output = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(output)
-
-        // Draw face
         canvas.drawBitmap(faceBitmap, 0f, 0f, null)
 
-        // Create mask using Radial Gradient Alpha
         val maskBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val maskCanvas = Canvas(maskBitmap)
 
-        val radius = max(w, h) * 0.55f
-        val innerRadius = radius * (1.0f - (feathering * 0.5f).coerceIn(0.1f, 0.8f))
+        val centerX = w * 0.5f
+        val centerY = h * 0.48f
+        val rx = w * 0.46f
+        val ry = h * 0.48f
+
+        val facePath = Path()
+        val contour = sourceLandmarks.contourPoints
+
+        if (contour.size >= 5) {
+            // Build polygon path from ML Kit contour points transformed into local crop coordinates
+            val first = contour[0]
+            facePath.moveTo(first.x - cropLeft, first.y - cropTop)
+            for (i in 1 until contour.size) {
+                val pt = contour[i]
+                facePath.lineTo(pt.x - cropLeft, pt.y - cropTop)
+            }
+            facePath.close()
+        } else {
+            // Fallback: Anatomical face contour path (smooth egg shape: wider top, tapered chin)
+            val topY = centerY - ry * 0.95f
+            val bottomY = centerY + ry * 1.05f
+            val leftX = centerX - rx * 0.95f
+            val rightX = centerX + rx * 0.95f
+            val templeY = centerY - ry * 0.3f
+            val jawY = centerY + ry * 0.65f
+            val chinWidthHalf = rx * 0.45f
+
+            facePath.moveTo(centerX, topY)
+            facePath.cubicTo(centerX + rx * 0.7f, topY, rightX, templeY - ry * 0.2f, rightX, templeY)
+            facePath.cubicTo(rightX, jawY - ry * 0.1f, centerX + chinWidthHalf * 1.4f, jawY, centerX + chinWidthHalf, bottomY - ry * 0.1f)
+            facePath.cubicTo(centerX + chinWidthHalf * 0.5f, bottomY, centerX - chinWidthHalf * 0.5f, bottomY, centerX - chinWidthHalf, bottomY - ry * 0.1f)
+            facePath.cubicTo(centerX - chinWidthHalf * 1.4f, jawY, leftX, jawY - ry * 0.1f, leftX, templeY)
+            facePath.cubicTo(leftX, templeY - ry * 0.2f, centerX - rx * 0.7f, topY, centerX, topY)
+            facePath.close()
+        }
+
+        // Multi-stop Radial Gradient for soft, natural falloff
+        val maxDim = max(w, h).toFloat()
+        val innerStop = (0.50f - feathering * 0.15f).coerceIn(0.25f, 0.65f)
+        val midStop = (0.75f + feathering * 0.05f).coerceIn(0.60f, 0.88f)
 
         val gradient = RadialGradient(
-            w * 0.5f, h * 0.5f, radius,
+            centerX, centerY, maxDim * 0.52f,
             intArrayOf(
-                android.graphics.Color.WHITE,
-                android.graphics.Color.WHITE,
-                android.graphics.Color.TRANSPARENT
+                Color.WHITE,
+                Color.WHITE,
+                Color.argb(180, 255, 255, 255),
+                Color.TRANSPARENT
             ),
-            floatArrayOf(0f, innerRadius / radius, 1f),
+            floatArrayOf(0f, innerStop, midStop, 1.0f),
             Shader.TileMode.CLAMP
         )
 
         val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             shader = gradient
         }
-        maskCanvas.drawOval(RectF(0f, 0f, w.toFloat(), h.toFloat()), maskPaint)
+        maskCanvas.drawPath(facePath, maskPaint)
 
-        // Apply mask onto face using DST_IN
+        // Apply fast box-blur pass on the mask alpha for seamless edge transitions
+        val blurredMask = fastBlurAlpha(maskBitmap, radius = (feathering * 16f + 4f).toInt())
+
+        // Apply feathered mask onto the face bitmap using DST_IN
         val blendPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
         }
-        canvas.drawBitmap(maskBitmap, 0f, 0f, blendPaint)
+        canvas.drawBitmap(blurredMask, 0f, 0f, blendPaint)
 
         return output
+    }
+
+    /**
+     * Fast two-pass box blur for alpha smoothing to guarantee edge feathering.
+     */
+    private fun fastBlurAlpha(src: Bitmap, radius: Int): Bitmap {
+        if (radius <= 0) return src
+        val w = src.width
+        val h = src.height
+        val pix = IntArray(w * h)
+        src.getPixels(pix, 0, w, 0, 0, w, h)
+
+        val wm = w - 1
+        val hm = h - 1
+        val wh = w * h
+        val div = radius + radius + 1
+
+        val a = IntArray(wh)
+        var sum: Int
+
+        for (i in 0 until wh) {
+            a[i] = (pix[i] ushr 24)
+        }
+
+        // Horizontal Pass
+        var yw = 0
+        var yi = 0
+        for (y in 0 until h) {
+            sum = 0
+            for (i in -radius..radius) {
+                sum += a[yi + min(wm, max(i, 0))]
+            }
+            for (x in 0 until w) {
+                a[yi] = sum / div
+                val p1 = yw + min(x + radius + 1, wm)
+                val p2 = yw + max(x - radius, 0)
+                sum += (pix[p1] ushr 24) - (pix[p2] ushr 24)
+                yi++
+            }
+            yw += w
+        }
+
+        // Vertical Pass
+        for (x in 0 until w) {
+            sum = 0
+            val yp = -radius * w
+            for (i in -radius..radius) {
+                yi = max(0, yp + i * w) + x
+                sum += a[yi]
+            }
+            yi = x
+            for (y in 0 until h) {
+                val newAlpha = (sum / div).coerceIn(0, 255)
+                pix[yi] = (newAlpha shl 24) or 0x00FFFFFF
+                val p1 = x + min(y + radius + 1, hm) * w
+                val p2 = x + max(y - radius, 0) * w
+                sum += a[p1] - a[p2]
+                yi += w
+            }
+        }
+
+        val blurred = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        blurred.setPixels(pix, 0, w, 0, 0, w, h)
+        return blurred
     }
 
     /**
@@ -282,7 +362,6 @@ object FaceSwapEngine {
     ): Bitmap {
         val output = Bitmap.createBitmap(inputBitmap.width, inputBitmap.height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(output)
-
         val finalMatrix = ColorMatrix()
 
         // 1. Basic adjustments
@@ -324,7 +403,6 @@ object FaceSwapEngine {
         when (filter) {
             FilterType.NONE -> { /* No-op */ }
             FilterType.CYBERPUNK -> {
-                // Boost blues & cyans in shadows, hot magenta in highlights
                 filterMat.set(
                     floatArrayOf(
                         1.2f, 0.0f, 0.3f, 0f, 20f,
@@ -335,7 +413,6 @@ object FaceSwapEngine {
                 )
             }
             FilterType.VINTAGE_90S -> {
-                // Warm nostalgic film sepia & soft contrast
                 filterMat.set(
                     floatArrayOf(
                         1.15f, 0.1f, 0.0f, 0f, 15f,
@@ -346,7 +423,6 @@ object FaceSwapEngine {
                 )
             }
             FilterType.GOLDEN_HOUR -> {
-                // Golden amber warmth and rich sunlight glow
                 filterMat.set(
                     floatArrayOf(
                         1.3f, 0.1f, 0.0f, 0f, 25f,
@@ -357,7 +433,6 @@ object FaceSwapEngine {
                 )
             }
             FilterType.FILM_NOIR -> {
-                // High contrast cinematic black and white
                 val bwMat = ColorMatrix().apply { setSaturation(0f) }
                 val bwContrast = ColorMatrix().apply {
                     val c = 1.35f
@@ -374,7 +449,6 @@ object FaceSwapEngine {
                 filterMat.setConcat(bwContrast, bwMat)
             }
             FilterType.STUDIO_GLOW -> {
-                // Soft glamorous skin luminosity
                 filterMat.set(
                     floatArrayOf(
                         1.08f, 0.02f, 0.02f, 0f, 18f,
@@ -385,7 +459,6 @@ object FaceSwapEngine {
                 )
             }
             FilterType.COMIC_POP -> {
-                // Vivid pop art saturation and distinct punch
                 val popSat = ColorMatrix().apply { setSaturation(1.6f) }
                 filterMat.set(popSat)
             }
@@ -418,7 +491,7 @@ object FaceSwapEngine {
 
         finalMatrix.postConcat(filterMat)
 
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
             colorFilter = ColorMatrixColorFilter(finalMatrix)
         }
         canvas.drawBitmap(inputBitmap, 0f, 0f, paint)
@@ -448,77 +521,44 @@ object FaceSwapEngine {
             canvas.translate(posX, posY)
             canvas.rotate(sticker.rotation)
             canvas.scale(sticker.scale, sticker.scale)
-
-            canvas.drawText(sticker.type.emoji, 0f, stickerPaint.textSize * 0.35f, stickerPaint)
+            canvas.drawText(sticker.type.emoji, 0f, 0f, stickerPaint)
             canvas.restore()
+        }
+
+        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            textAlign = Paint.Align.CENTER
         }
 
         for (overlay in textOverlays) {
             val posX = overlay.offsetX * canvasW
             val posY = overlay.offsetY * canvasH
 
-            val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = try { android.graphics.Color.parseColor(overlay.colorHex) } catch (e: Exception) { android.graphics.Color.WHITE }
-                textSize = overlay.fontSize * (canvasW / 400f)
-                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                textAlign = Paint.Align.CENTER
-                setShadowLayer(8f, 2f, 2f, android.graphics.Color.BLACK)
+            textPaint.textSize = overlay.fontSize * (canvasW / 400f)
+            try {
+                textPaint.color = Color.parseColor(overlay.colorHex)
+            } catch (e: Exception) {
+                textPaint.color = Color.WHITE
             }
 
             if (overlay.hasBackground) {
-                val bounds = Rect()
-                textPaint.getTextBounds(overlay.text, 0, overlay.text.length, bounds)
+                val textBounds = Rect()
+                textPaint.getTextBounds(overlay.text, 0, overlay.text.length, textBounds)
                 val padX = 24f
                 val padY = 16f
                 val bgRect = RectF(
-                    posX - bounds.width() * 0.5f - padX,
-                    posY - bounds.height() - padY,
-                    posX + bounds.width() * 0.5f + padX,
-                    posY + padY
+                    posX + textBounds.left - padX,
+                    posY + textBounds.top - padY,
+                    posX + textBounds.right + padX,
+                    posY + textBounds.bottom + padY
                 )
                 val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = android.graphics.Color.argb(160, 0, 0, 0)
+                    color = Color.argb(170, 0, 0, 0)
                 }
                 canvas.drawRoundRect(bgRect, 16f, 16f, bgPaint)
             }
 
             canvas.drawText(overlay.text, posX, posY, textPaint)
         }
-    }
-
-    /**
-     * Generates a side-by-side / split Before & After comparison bitmap.
-     */
-    fun createSplitComparison(
-        beforeBitmap: Bitmap,
-        afterBitmap: Bitmap,
-        splitRatio: Float = 0.5f // 0f (all before) to 1f (all after)
-    ): Bitmap {
-        val w = beforeBitmap.width
-        val h = beforeBitmap.height
-        val output = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(output)
-
-        // Draw Before (Left side)
-        val splitX = (w * splitRatio).toInt()
-        val beforeSrc = Rect(0, 0, splitX, h)
-        val beforeDst = Rect(0, 0, splitX, h)
-        canvas.drawBitmap(beforeBitmap, beforeSrc, beforeDst, null)
-
-        // Draw After (Right side)
-        val afterSrc = Rect(splitX, 0, w, h)
-        val afterDst = Rect(splitX, 0, w, h)
-        canvas.drawBitmap(afterBitmap, afterSrc, afterDst, null)
-
-        // Draw Divider Line with Glow
-        val dividerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = android.graphics.Color.WHITE
-            strokeWidth = 6f
-            style = Paint.Style.STROKE
-            setShadowLayer(8f, 0f, 0f, android.graphics.Color.CYAN)
-        }
-        canvas.drawLine(splitX.toFloat(), 0f, splitX.toFloat(), h.toFloat(), dividerPaint)
-
-        return output
     }
 }

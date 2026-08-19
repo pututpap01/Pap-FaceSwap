@@ -129,6 +129,8 @@ data class FaceDetectionResult(
     val boundsBottom: Float = 0.85f,
     val eyeDistance: Float = 0.3f,
     val angle: Float = 0f,
+    val centerX: Float = 0.5f,
+    val centerY: Float = 0.5f,
     val estimatedSkinToneR: Int = 220,
     val estimatedSkinToneG: Int = 180,
     val estimatedSkinToneB: Int = 150
