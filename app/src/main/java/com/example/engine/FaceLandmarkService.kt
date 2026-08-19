@@ -50,7 +50,12 @@ object FaceLandmarkService {
         val h = bitmap.height
 
         try {
-            val inputImage = InputImage.fromBitmap(bitmap, 0)
+            val safeBitmap = if (bitmap.config == Bitmap.Config.HARDWARE) {
+                bitmap.copy(Bitmap.Config.ARGB_8888, false)
+            } else {
+                bitmap
+            }
+            val inputImage = InputImage.fromBitmap(safeBitmap, 0)
             val faces = Tasks.await(detector.process(inputImage))
 
             if (!faces.isNullOrEmpty()) {

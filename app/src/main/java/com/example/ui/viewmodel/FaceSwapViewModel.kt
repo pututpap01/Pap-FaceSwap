@@ -157,6 +157,10 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun setSwapMode(mode: SwapMode) {
+        _uiState.update { it.copy(swapMode = mode) }
+    }
+
     private fun autoTriggerSwapIfReady() {
         if (_uiState.value.targetBitmap != null && _uiState.value.sourceBitmap != null) {
             performFaceSwap()
@@ -166,39 +170,56 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
     fun performFaceSwap() {
         val target = _uiState.value.targetBitmap ?: return
         val source = _uiState.value.sourceBitmap ?: return
+        val mode = _uiState.value.swapMode
 
         viewModelScope.launch {
             _uiState.update {
                 it.copy(
                     isProcessing = true,
-                    processingMessage = "Memulai Pemrosesan AI Lokal...",
-                    processingProgress = 0.15f
+                    processingMessage = if (mode == SwapMode.AI_ENHANCED) 
+                        "Menghubungkan ke Neural Generative Model (Gemini 2.5)..." 
+                        else "Memulai Pemrosesan AI Lokal...",
+                    processingProgress = 0.20f
                 )
             }
 
-            delay(150)
-            _uiState.update {
-                it.copy(
-                    processingMessage = "Mendeteksi landmark wajah & posisi mata...",
-                    processingProgress = 0.45f
-                )
+            var result: Bitmap? = null
+
+            if (mode == SwapMode.AI_ENHANCED && com.example.engine.NeuralFaceSwapService.isApiKeyConfigured()) {
+                _uiState.update {
+                    it.copy(
+                        processingMessage = "Sintesis Deep Neural Face Morph & Tekstur Kulit...",
+                        processingProgress = 0.55f
+                    )
+                }
+                result = com.example.engine.NeuralFaceSwapService.performNeuralFaceSwap(target, source)
             }
 
-            delay(200)
-            _uiState.update {
-                it.copy(
-                    processingMessage = "Harmonisasi rona kulit & pencahayaan...",
-                    processingProgress = 0.75f
+            if (result == null) {
+                // High-precision ML Kit 3D Landmark & Reinhard Tone Harmonization
+                _uiState.update {
+                    it.copy(
+                        processingMessage = "Mendeteksi landmark wajah & posisi mata (ML Kit)...",
+                        processingProgress = 0.45f
+                    )
+                }
+
+                delay(100)
+                _uiState.update {
+                    it.copy(
+                        processingMessage = "Harmonisasi rona kulit & blending kontur...",
+                        processingProgress = 0.75f
+                    )
+                }
+
+                result = FaceSwapEngine.performFaceSwap(
+                    targetBitmap = target,
+                    sourceBitmap = source,
+                    adjustments = _uiState.value.adjustments,
+                    stickers = _uiState.value.placedStickers,
+                    textOverlays = _uiState.value.textOverlays
                 )
             }
-
-            val result = FaceSwapEngine.performFaceSwap(
-                targetBitmap = target,
-                sourceBitmap = source,
-                adjustments = _uiState.value.adjustments,
-                stickers = _uiState.value.placedStickers,
-                textOverlays = _uiState.value.textOverlays
-            )
 
             _uiState.update {
                 it.copy(

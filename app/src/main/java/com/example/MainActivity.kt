@@ -179,6 +179,7 @@ fun FaceMorphApp(
                             onSwapSlots = { viewModel.swapTargetAndSource() },
                             onPerformSwap = { viewModel.performFaceSwap() },
                             onSelectTemplate = { template -> viewModel.selectTemplate(template) },
+                            onSelectSwapMode = { mode -> viewModel.setSwapMode(mode) },
                             onOpenEditor = { viewModel.selectTab(AppTab.EDITOR) },
                             onShowPrivacyDialog = { viewModel.showPrivacyDialog(true) },
                             onShowShareSheet = { viewModel.showShareSheet(true) }

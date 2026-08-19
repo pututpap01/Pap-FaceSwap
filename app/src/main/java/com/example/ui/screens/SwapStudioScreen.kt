@@ -52,6 +52,7 @@ fun SwapStudioScreen(
     onSwapSlots: () -> Unit,
     onPerformSwap: () -> Unit,
     onSelectTemplate: (com.example.domain.model.FaceTemplate) -> Unit,
+    onSelectSwapMode: (SwapMode) -> Unit = {},
     onOpenEditor: () -> Unit,
     onShowPrivacyDialog: () -> Unit,
     onShowShareSheet: () -> Unit
@@ -320,6 +321,138 @@ fun SwapStudioScreen(
                             maxLines = 1,
                             fontSize = 10.sp
                         )
+                    }
+                }
+            }
+        }
+
+        // AI Model Selection Mode (Generative Neural AI vs On-Device Fast ML Kit)
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0x18FFFFFF)),
+            border = androidx.compose.foundation.BorderStroke(1.dp, BorderGlass)
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Icon(
+                            imageVector = Icons.Default.Psychology,
+                            contentDescription = null,
+                            tint = PrimaryGlow,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = "PILIH MODEL FACE SWAP",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = PrimaryGlow,
+                            letterSpacing = 1.sp
+                        )
+                    }
+
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (state.swapMode == SwapMode.AI_ENHANCED) Color(0x30A855F7) else Color(0x203B82F6),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, if (state.swapMode == SwapMode.AI_ENHANCED) Color(0x60A855F7) else Color(0x503B82F6))
+                    ) {
+                        Text(
+                            text = if (state.swapMode == SwapMode.AI_ENHANCED) "✨ Deep Neural AI" else "⚡ ML Kit Lokal",
+                            color = if (state.swapMode == SwapMode.AI_ENHANCED) Color(0xFFE9D5FF) else Color(0xFF93C5FD),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // Option 1: Neural AI Generative Model
+                    val isNeural = state.swapMode == SwapMode.AI_ENHANCED
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(14.dp))
+                            .then(
+                                if (isNeural) Modifier.background(GlassGradientPrimary)
+                                else Modifier.background(Color(0x10FFFFFF))
+                            )
+                            .border(
+                                1.dp,
+                                if (isNeural) Color.White.copy(alpha = 0.4f) else BorderGlass,
+                                RoundedCornerShape(14.dp)
+                            )
+                            .clickable { onSelectSwapMode(SwapMode.AI_ENHANCED) }
+                            .padding(10.dp)
+                            .testTag("mode_neural_ai")
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("✨", fontSize = 12.sp)
+                                Text(
+                                    text = "Neural Deep AI",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                            }
+                            Text(
+                                text = "Sintesis fotorealistik tekstur, cahaya & rambut (Gemini)",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontSize = 10.sp,
+                                color = if (isNeural) Color.White.copy(alpha = 0.9f) else TextSecondary,
+                                maxLines = 2
+                            )
+                        }
+                    }
+
+                    // Option 2: ML Kit On-Device Landmark Model
+                    val isLocal = state.swapMode == SwapMode.LOCAL_AI_FAST
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(14.dp))
+                            .then(
+                                if (isLocal) Modifier.background(GlassGradientPrimary)
+                                else Modifier.background(Color(0x10FFFFFF))
+                            )
+                            .border(
+                                1.dp,
+                                if (isLocal) Color.White.copy(alpha = 0.4f) else BorderGlass,
+                                RoundedCornerShape(14.dp)
+                            )
+                            .clickable { onSelectSwapMode(SwapMode.LOCAL_AI_FAST) }
+                            .padding(10.dp)
+                            .testTag("mode_local_mlkit")
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("⚡", fontSize = 12.sp)
+                                Text(
+                                    text = "ML Kit 3D Lokal",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                            }
+                            Text(
+                                text = "Penyelarasan landmark 3D pupil & warna instan offline",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontSize = 10.sp,
+                                color = if (isLocal) Color.White.copy(alpha = 0.9f) else TextSecondary,
+                                maxLines = 2
+                            )
+                        }
                     }
                 }
             }
