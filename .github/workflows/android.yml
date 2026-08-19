@@ -17,7 +17,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: '17'
           distribution: 'temurin'
@@ -54,7 +54,7 @@ jobs:
 
       - name: Build Debug APK
         run: |
-          gradle assembleDebug --no-daemon --no-configuration-cache --stacktrace
+          gradle assembleDebug --stacktrace --no-daemon -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g"
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
